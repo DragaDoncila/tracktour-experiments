@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/tracktour_experiments/__init__.py
+src/tracktour_experiments/experiment_schema.py
+src/tracktour_experiments/generate_configs.py
+src/tracktour_experiments/generate_dataset_summary.py
+src/tracktour_experiments.egg-info/PKG-INFO
+src/tracktour_experiments.egg-info/SOURCES.txt
+src/tracktour_experiments.egg-info/dependency_links.txt
+src/tracktour_experiments.egg-info/requires.txt
+src/tracktour_experiments.egg-info/top_level.txt
