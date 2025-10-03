@@ -1,7 +1,7 @@
 import pandas as pd
 
-from experiment_schema import TraxData, TraxInstance, TraxTour, Traxperiment
-from utils import get_scale
+from tracktour_experiments.experiment_schema import TraxData, TraxInstance, TraxTour, Traxperiment
+from tracktour_experiments.utils import get_scale
 
 def ds_summary_to_configs(
         ds_summary_path,
@@ -12,7 +12,8 @@ def ds_summary_to_configs(
         merge_capacity=2,
         flow_penalty=0,
         allow_merges=True,
-        k_neighbours=10
+        k_neighbours=10,
+        use_scale=True,
     ):
     """Convert dataset summary to Traxperiment configs.
 
@@ -50,7 +51,8 @@ def ds_summary_to_configs(
             penalize_flow=penalize_flow,
             flow_penalty=flow_penalty,
             allow_merges=allow_merges,
-            k_neighbours=k_neighbours
+            k_neighbours=k_neighbours,
+            use_scale=use_scale
         )
         configs.append(exp_config)
 
@@ -65,14 +67,18 @@ def get_config_for_row(
         merge_capacity=2,
         flow_penalty=0,
         allow_merges=True,
-        k_neighbours=10
+        k_neighbours=10,
+        use_scale=True
     ):
     frame_shape = eval(row['im_shape'])
+    scale = tuple([1 for _ in range(len(frame_shape))])
+    if use_scale:
+        scale = get_scale(row['ds_name']) or scale
     data_config = TraxData(
         dataset_name=row['ds_name'],
         detections_path=row['det_path'],
         frame_shape=frame_shape,
-        scale=get_scale(row['ds_name']),
+        scale=scale,
         frame_key='t',
         location_keys=["y", "x"] if len(frame_shape) == 2 else ["z", "y", "x"],
         image_path=row['im_path'],

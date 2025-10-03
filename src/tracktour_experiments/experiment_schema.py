@@ -2,14 +2,18 @@ from enum import Enum, auto
 import json
 import networkx as nx
 import time
+import numpy as np
 import pandas as pd
 from importlib.metadata import version
 from pydantic import BaseModel, Field, conlist
-from tracktour import Tracker, load_tiff_frames
+from scipy.special import softmax
+from tracktour import Tracker, load_tiff_frames, get_ctc_output
+from tracktour.cli import _save_results
 from traccuracy import TrackingGraph
 from traccuracy.loaders import load_ctc_data
 from traccuracy.matchers import CTCMatcher
 from traccuracy.metrics import CTCMetrics
+from traccuracy.utils import export_graphs_to_geff
 from typing import Optional, Union
 import os
 
@@ -43,6 +47,7 @@ class OUT_FILE(Enum):
     MATCHING = 'matching.json'
     MATCHED_SOL = 'matched_solution.graphml'
     MATCHED_GT = 'matched_gt.graphml'
+    GEFF = 'matched_solution.zarr'
 
 
 
@@ -115,7 +120,7 @@ class Traxperiment(BaseModel):
         
         return tracker
 
-    def run(self, write_out=True, compute_additional_features=False):
+    def run(self, write_out=True, compute_additional_features=False, as_ctc=False):
         start = time.time()
         tracker = self.as_tracker()
         if tracker.PENALIZE_FLOW and tracker.FLOW_PENALTY_COEFFICIENT == 0:
@@ -139,19 +144,24 @@ class Traxperiment(BaseModel):
             # compute sensitivity information from model and store in `all_edges`
             assign_migration_features(tracked.all_edges, detections)
             assign_sensitivity_features(tracked.all_edges, tracked.model)
+            assign_probability_features(tracked.all_edges)
 
         
         if write_out:
-            self.write_solved(tracked, start)
+            self.write_solved(tracked, start, as_ctc=as_ctc)
 
         return tracked
     
-    def evaluate(self, tracked_detections=None, tracked_edges=None, write_out=True):
+    def evaluate(self, tracked_detections=None, tracked_edges=None, write_out=True, as_ctc=False):
         if self.data_config.ground_truth_path is None:
             raise ValueError(f"Cannot evaluate experiment without ground truth path configured.")
         if self.data_config.value_key is None:
             raise ValueError("Cannot evaluate experiment without `value_key` configured.")
-        track_graph = self.load_solution_for_metrics(tracked_detections, tracked_edges)
+        if as_ctc:
+            res_dir = os.path.join(self.get_path_to_out_dir(), 'RES/')
+            track_graph = load_ctc_data(res_dir)
+        else:
+            track_graph = self.load_solution_for_metrics(tracked_detections, tracked_edges)
         # load ground truth data using CTC loader
         gt_graph = load_ctc_data(self.data_config.ground_truth_path)
 
@@ -160,37 +170,52 @@ class Traxperiment(BaseModel):
         results = CTCMetrics().compute(matched)
         
         if write_out:
-            self.write_metrics(results.results, matched)
+            self.write_metrics(results, matched)
         return results.results, matched
 
     def write_metrics(self, results, matched):
         out_ds = self.get_path_to_out_dir()
-        with open(os.path.join(out_ds, OUT_FILE.METRICS.value), 'w') as f:
-            json.dump(results, f)
+        out_zarr = os.path.join(out_ds, OUT_FILE.GEFF.value)
+        # with open(os.path.join(out_ds, OUT_FILE.METRICS.value), 'w') as f:
+        #     json.dump(results, f)
         with open(os.path.join(out_ds, OUT_FILE.MATCHING.value), 'w') as f:
             json.dump(matched.mapping, f)
-        nx.write_graphml(matched.pred_graph.graph, os.path.join(out_ds, OUT_FILE.MATCHED_SOL.value))
-        nx.write_graphml(matched.gt_graph.graph, os.path.join(out_ds, OUT_FILE.MATCHED_GT.value))
+        export_graphs_to_geff(out_zarr, matched, [results])
+        # nx.write_graphml(matched.pred_graph.graph, os.path.join(out_ds, OUT_FILE.MATCHED_SOL.value))
+        # nx.write_graphml(matched.gt_graph.graph, os.path.join(out_ds, OUT_FILE.MATCHED_GT.value))
 
-    def write_solved(self, tracked, start):
+
+    def write_solved(self, tracked, start, as_ctc=False):
         # TODO: formalize/document that we're writing out and potentially overwriting path
         out_ds = self.get_path_to_out_dir()
         os.makedirs(out_ds, exist_ok=True)
-        
-        # write out dataframes
         tracked_dict = dict(tracked)
-        for k in [OUT_FILE.TRACKED_EDGES, OUT_FILE.TRACKED_DETECTIONS, OUT_FILE.ALL_EDGES, OUT_FILE.ALL_VERTICES]:
-            file_key = k.value
-            attr_key = file_key.split('.')[0]
-            out_pth = self.get_path_to_out_file(k)
-            if (info := tracked_dict.pop(attr_key)) is not None:
-                info.to_csv(out_pth, index=False)
+        write_keys = [k for k in tracked_dict.keys() if 'time' in k or 'value' in k]
+
+
+        if as_ctc:
+            out_res = os.path.join(out_ds, 'RES/')
+            os.makedirs(out_res, exist_ok=True)
+            sol_graph = tracked.as_nx_digraph()
+            seg = load_tiff_frames(self.data_config.segmentation_path)
+            relabelled_seg, track_df, _ = get_ctc_output(
+                seg, sol_graph, tracked.frame_key, tracked.value_key, tracked.location_keys,
+            )
+            _save_results(relabelled_seg, track_df, out_res)
+        else:
+            # write out dataframes
+            for k in [OUT_FILE.TRACKED_EDGES, OUT_FILE.TRACKED_DETECTIONS, OUT_FILE.ALL_EDGES, OUT_FILE.ALL_VERTICES]:
+                file_key = k.value
+                attr_key = file_key.split('.')[0]
+                out_pth = self.get_path_to_out_file(k)
+                if (info := tracked_dict.pop(attr_key)) is not None:
+                    info.to_csv(out_pth, index=False)
 
         # write out model (mps and lp)
-        if (model := tracked_dict.pop('model')) is not None:
-            model.write(self.get_path_to_out_file(OUT_FILE.MODEL_LP))
-            model.write(self.get_path_to_out_file(OUT_FILE.MODEL_MPS))
-            model.write(self.get_path_to_out_file(OUT_FILE.MODEL_SOL))
+        # if (model := tracked_dict.pop('model')) is not None:
+        #     model.write(self.get_path_to_out_file(OUT_FILE.MODEL_LP))
+        #     model.write(self.get_path_to_out_file(OUT_FILE.MODEL_MPS))
+        #     model.write(self.get_path_to_out_file(OUT_FILE.MODEL_SOL))
         
         # TODO: formalize/document that the BUILT version is written, so we don't want to
         # be running experiments in editable mode
@@ -205,11 +230,12 @@ class Traxperiment(BaseModel):
 
         # experiment wall time
         duration = time.time() - start
-        tracked_dict.update({
+        write_dict = { k : v for k, v in tracked_dict.items() if k in write_keys }
+        write_dict.update({
             'exp_time': duration
         })
         with open(self.get_path_to_out_file(OUT_FILE.TIMING), 'w') as f:
-            json.dump(tracked_dict, f)
+            json.dump(write_dict, f)
     
     def get_path_to_out_dir(self):
         return os.path.join(self.data_config.out_root_path, self.data_config.dataset_name)
@@ -231,7 +257,7 @@ class Traxperiment(BaseModel):
             tracked_edges = pd.read_csv(self.get_path_to_out_file(OUT_FILE.TRACKED_EDGES))
         seg_ims = load_tiff_frames(self.data_config.segmentation_path)
         sol_graph = nx.from_pandas_edgelist(tracked_edges, "u", "v", ["flow", "cost"], create_using=nx.DiGraph)
-        det_keys = [self.data_config.frame_key] + self.data_config.location_keys + [self.data_config.value_key] + ['enter_exit_cost', 'div_cost']
+        det_keys = [self.data_config.frame_key] + self.data_config.location_keys + [self.data_config.value_key] + ['enter_cost', 'exit_cost', 'div_cost']
         sol_graph.add_nodes_from(tracked_detections[det_keys].to_dict(orient='index').items())
 
         track_graph = TrackingGraph(
@@ -286,10 +312,35 @@ def assign_sensitivity_features(
     all_edges['sa_obj_low'] = sa_obj_low
     all_edges['sa_obj_up'] = sa_obj_up
     all_edges['sensitivity_diff'] = sens_diffs
-    
+
+def assign_probability_features(
+        all_edges
+    ):
+    # exit edges will have -1 probabilities here!
+    # they'll either always be at the front or always at the end
+    # in ranking!
+    all_edges['softmax'] = -1.0
+    all_edges['softmax_entropy'] = -1.0
+    all_edges['parental_softmax'] = -1.0
+
+    all_edges_with_app = all_edges[(all_edges.v >= 0) & ((all_edges.u == -2) | (all_edges.u >= 0))]
+    for v in all_edges_with_app.v.unique():
+        v_edges = all_edges_with_app[all_edges_with_app.v == v]
+        softmax_dist = softmax(-v_edges.cost)
+        all_edges.loc[v_edges.index, 'softmax'] = softmax_dist
+        entropy = -np.sum(softmax_dist * np.log(softmax_dist))
+        all_edges.loc[v_edges.index, 'softmax_entropy'] = entropy
+
+        v_edges_no_app = v_edges[v_edges.u >= 0]
+        v_edges_app = v_edges[v_edges.u == -2]
+        exp_sum = np.sum(np.exp(-v_edges_no_app.cost))
+        parental_softmax = np.exp(-v_edges_no_app.cost) / (1 + exp_sum)
+        all_edges.loc[v_edges_no_app.index, 'parental_softmax'] = parental_softmax
+        all_edges.loc[v_edges_app.index, 'parental_softmax'] = 1 - np.sum(parental_softmax)
+
 
 if __name__ == '__main__':
-    from utils import get_scale
+    from tracktour_experiments.utils import get_scale
     DATA_ROOT = '/home/ddon0001/PhD/data/cell_tracking_challenge/ST/Fluo-N2DL-HeLa/'
     ds_name = 'Fluo-N2DL-HeLa_02'
     data_config = TraxData(
@@ -299,7 +350,7 @@ if __name__ == '__main__':
         detections_path='/home/ddon0001/PhD/data/cell_tracking_challenge/ST/Fluo-N2DL-HeLa/02_ST/SEG/detections.csv',
         out_root_path='/home/ddon0001/PhD/experiments/no_div_constraint/',
         frame_shape=[700, 1100],
-        scale=get_scale(ds_name),
+        scale=get_scale(ds_name) or (1, 1),
     )
     experiment = Traxperiment(data_config=data_config)
     experiment.tracktour_config.div_constraint = True

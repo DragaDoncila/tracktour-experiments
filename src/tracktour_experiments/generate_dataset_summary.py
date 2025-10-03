@@ -37,15 +37,17 @@ def get_immediate_subdirectories(a_dir):
             if os.path.isdir(os.path.join(a_dir, name))]
 
 
-def generate_ctc_summary(root_dir, ds_summary_path, use_gt=False, use_err_seg=False):
+def generate_ctc_summary(root_seg_dir, ds_summary_path, gt_dir=None, use_gt=False, use_err_seg=False):
     """Write summary info of ctc datasets in root_dir to ds_summary_path.
 
     Parameters
     ----------
     root_dir : str
-        path to directory containing CTC datasets
+        path to directory containing CTC segmentations
     ds_summary_path : str
         path to write summary csv
+    gt_dir: str | None
+        path to root GT dir containing TRA GT and ims, if stored separately
     use_gt : bool, optional
         whether to just use the ground truth images for detections
     use_err_seg : bool, optional
@@ -57,30 +59,32 @@ def generate_ctc_summary(root_dir, ds_summary_path, use_gt=False, use_err_seg=Fa
         summary dataframe
     """
     # get all folders and use basename as dataset name
-    ds_names = get_immediate_subdirectories(root_dir)
+    ds_names = get_immediate_subdirectories(root_seg_dir)
+    gt_dir = gt_dir or root_seg_dir
+    im_dir = gt_dir or root_seg_dir
     if not ds_names:
-        raise ValueError(f"Given directory has no subdirectories: {root_dir}")
+        raise ValueError(f"Given directory has no subdirectories: {root_seg_dir}")
     rows = []
     for ds_name in tqdm(ds_names):
-        ds_im_path = os.path.join(root_dir, ds_name, IM_DIR_GLOB)
+        ds_im_path = os.path.join(im_dir, ds_name, IM_DIR_GLOB)
         im_seqs = glob.glob(ds_im_path)
         if not im_seqs:
             warnings.warn(f"No image sequences found for dataset {ds_name}. Skipping dataset...", UserWarning)
             continue
         for seq_pth in im_seqs:
             seq = os.path.basename(os.path.dirname(seq_pth)).split('_RES')[0]
-            gt_path = os.path.join(root_dir, ds_name, f'{seq}{GT_TRA_SUFFIX}')
+            gt_path = os.path.join(gt_dir, ds_name, f'{seq}{GT_TRA_SUFFIX}')
             if not os.path.exists(gt_path):
                 raise ValueError(f"Ground truth path not found: {gt_path}")
             if use_gt:
                 in_seg_path = gt_path
             elif use_err_seg:
-                in_seg_path = os.path.join(root_dir, ds_name, f'{seq}{ERR_SEG_SUFFIX}')
+                in_seg_path = os.path.join(root_seg_dir, ds_name, f'{seq}{ERR_SEG_SUFFIX}')
                 if not os.path.exists(in_seg_path):
                     warnings.warn(f'No error segmentation for dataset {ds_name}_{seq}. Skipping...')
                     continue
             else:
-                in_seg_path = os.path.join(root_dir, ds_name, f'{seq}{ST_SEG_SUFFIX}')
+                in_seg_path = os.path.join(root_seg_dir, ds_name, f'{seq}{ST_SEG_SUFFIX}')
                 if not os.path.exists(in_seg_path):
                     warnings.warn(f'No ST segmentation for dataset {ds_name}_{seq}. Skipping...')
                     continue
@@ -120,3 +124,50 @@ def generate_ctc_summary(root_dir, ds_summary_path, use_gt=False, use_err_seg=Fa
     df = pd.DataFrame(rows)
     df.to_csv(ds_summary_path)
     return df
+
+def generate_recurisve_summary(root_dir, ds_summary_path):
+    """Generates summary for trackastra training data directory structure."""
+    img_tra_pairs = []
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        if 'img' in dirnames and 'TRA' in dirnames:
+            # not sure what val is so we skip these sequences
+            if '/val/' in dirpath:
+                continue
+            parent_rel = os.path.relpath(dirpath, root_dir)
+            dataset = parent_rel.split(os.sep)[0]
+            sequence = '-'.join(parent_rel.split(os.sep)[1:])
+            img_tra_pairs.append({
+                'dataset': dataset,
+                'ds_name': f"{dataset}_{sequence}",
+                'im_path': os.path.join(dirpath, 'img'),
+                'seg_path': os.path.join(dirpath, 'TRA'),
+                'tra_gt_path': os.path.join(dirpath, 'TRA')
+            })
+    for ds_info in tqdm(img_tra_pairs, total=len(img_tra_pairs)):
+        im_path = ds_info['im_path']
+        in_seg_path = ds_info['seg_path']
+        out_det_path = os.path.join(in_seg_path, DET_CSV_NAME)
+        ims = load_tiff_frames(im_path)
+        im_shape = ims[0].shape
+        n_frames = ims.shape[0]
+        if not os.path.exists(out_det_path):
+            # extract detections
+            _, detections, _, _, _ = get_im_centers(in_seg_path)
+            detections.to_csv(out_det_path)
+        else:
+            detections = pd.read_csv(out_det_path)
+        grouped_det = detections.groupby(TIME_KEY).size()
+        min_cells = grouped_det.min()
+        max_cells = grouped_det.max()
+        total_cells = len(detections)
+        ds_info.update({
+            'im_shape': im_shape,
+            'n_frames': n_frames,
+            'min_det': min_cells,
+            'max_det': max_cells,
+            'total_det': total_cells,
+            'det_path': out_det_path,
+        })
+    summary_df = pd.DataFrame(img_tra_pairs)
+    summary_df.to_csv(ds_summary_path, index=False)
+    return summary_df
