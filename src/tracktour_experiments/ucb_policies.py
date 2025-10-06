@@ -91,7 +91,7 @@ def get_confidence_bound_for_arm(Nt, eta_t, B=1, epsilon=2):
     ct = B * np.sqrt(to_sqrt)
     return ct
 
-def get_ucb_for_arm(rewards, played_ranks, arm_name, Nt, eta_t, t, B=1, epsilon=2, gamma=1):
+def get_ucb_for_arm(Nt, discounted_reward, eta_t, B=1, epsilon=2):
     """Get the UCB for an arm at round t.
 
     When gamma=1, B=1 and epsilon=2 this is standard UCB1. When gamma<1,
@@ -99,49 +99,53 @@ def get_ucb_for_arm(rewards, played_ranks, arm_name, Nt, eta_t, t, B=1, epsilon=
 
     Parameters
     ----------
-    rewards : Dict[str, List[int]]
-        rewards for each arm pull
-    arm_name : str
-        name of the arm we are counting plays for. Must be a valid value
-        in the bandit_arm column of df.
-    Nt : int
-        number of times arm has been played
-    eta_t: int
+    Nt : float
+        discounted number of times arm has been played
+    discounted_reward : float
+        discounted sum of rewards for this arm
+    eta_t: float
         discounted total number of times arms have been played
-    t : int
+    t : float
         number of total rounds played so far
-    B : int, optional
+    B : float, optional
         maximum reward of arm, by default 1
-    epsilon : int, optional
+    epsilon : float, optional
         some appropriate constant, by default 2
     gamma : float, optional
         discount between 0 and 1, by default 1
     """
     if Nt < 1:
         return np.inf
-    reward_so_far = get_reward_for_arm(rewards, played_ranks, arm_name, t, gamma)
-    average_reward = reward_so_far / Nt
+    average_reward = discounted_reward / Nt
 
     confidence_bound = get_confidence_bound_for_arm(Nt, eta_t, B, epsilon)
 
     ucb = average_reward + confidence_bound
     return ucb
 
-# @profile
-def get_arm_to_play(df, bandit_arms, discounted_arm_played, played_ranks, rewards, t, B=1, epsilon=2, gamma=1):
+def get_arm_to_play(
+        bandit_arms,
+        discounted_arm_played,
+        discounted_arm_rewards,
+        B=1,
+        epsilon=2,
+        gamma=1
+):
     """Get the arm to play at round t.
 
     Parameters
     ----------
-    played_ranks : Dict[str, List[int]]
-        rounds each arm was played at
-    rewards : Dict[str, List[int]]
-        rewards for each arm pull
-    t : int
+    bandit_arms: List[str]
+        list of column names in df to use as bandit arms
+    discounted_arm_played : Dict[str, float]
+        discounted number of times each arm has been played
+    discounted_arm_rewards : Dict[str, float]
+        discounted sum of rewards for each arm
+    t : float
         number of total rounds played so far
-    B : int, optional
+    B : float, optional
         maximum reward of arm, by default 1
-    epsilon : int, optional
+    epsilon : float, optional
         some appropriate constant, by default 2
     gamma : float, optional
         discount between 0 and 1, by default 1
@@ -149,9 +153,16 @@ def get_arm_to_play(df, bandit_arms, discounted_arm_played, played_ranks, reward
     ucb_values = {}
     for arm in bandit_arms:
         discounted_arm_played[arm] *= gamma
+        discounted_arm_rewards[arm] *= gamma
     eta_t = sum(discounted_arm_played.values())
     for arm in bandit_arms:
-        ucb_values[arm] = get_ucb_for_arm(rewards, played_ranks, arm, discounted_arm_played[arm], eta_t, t, B, epsilon, gamma)
+        ucb_values[arm] = get_ucb_for_arm(
+            discounted_arm_played[arm],
+            discounted_arm_rewards[arm],
+            eta_t,
+            B,
+            epsilon
+        )
         if np.isnan(ucb_values[arm]):
             print('nan')
     arm_to_play = max(ucb_values, key=ucb_values.get)
@@ -197,7 +208,6 @@ def initialize_bandit(df, bandit_arms, ascending_sort):
         next_index[bandit_arm] += 1
     return feature_ranked, played_ranks, rewards, next_index, t
 
-# @profile
 def rank_edges_by_ucb(
         df,
         bandit_arms,
@@ -223,17 +233,26 @@ def rank_edges_by_ucb(
     discounted_arm_played = {
         arm: get_count_arm_played(played_ranks, arm, t, gamma) for arm in bandit_arms
     }
+    discounted_arm_rewards = {
+        arm: get_reward_for_arm(rewards, played_ranks, arm, t, gamma) for arm in bandit_arms
+    }
 
     unsampled = (df.bandit_rank == -1).sum()
     while unsampled > 0:
-        arm = get_arm_to_play(df, bandit_arms, discounted_arm_played, played_ranks, rewards, t, B, epsilon, gamma)
+        arm = get_arm_to_play(
+            bandit_arms,
+            discounted_arm_played,
+            discounted_arm_rewards,
+            B,
+            epsilon,
+            gamma
+        )
         edge = feature_ranked[arm].index[next_index[arm]]
         next_index[arm] += 1
         if df.loc[edge, 'bandit_rank'] == -1:
             df.loc[edge, 'bandit_rank'] = t
             df.loc[edge, 'bandit_arm'] = arm
-        played_ranks[arm].append(t)
-        rewards[arm].append(int(df.loc[edge, 'solution_incorrect']))
+        discounted_arm_rewards[arm] += int(df.loc[edge, 'solution_incorrect'])
         t += 1
         unsampled = (df.bandit_rank == -1).sum()
 
