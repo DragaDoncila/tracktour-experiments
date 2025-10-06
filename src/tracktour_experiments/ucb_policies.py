@@ -237,7 +237,7 @@ def rank_edges_by_ucb(
         arm: get_reward_for_arm(rewards, played_ranks, arm, t, gamma) for arm in bandit_arms
     }
 
-    unsampled = set(df.index)
+    unsampled = set(df[df.bandit_rank == -1].index.tolist())
     while len(unsampled) > 0:
         arm = get_arm_to_play(
             bandit_arms,
@@ -262,7 +262,6 @@ if __name__ == '__main__':
 
     all_df_pths = [
         os.path.join(all_df_pth, f) for f in os.listdir(all_df_pth) if f.endswith('.csv')
-        and f.startswith('Fluo-N2DL-HeLa_01')
     ]
 
     for pth in tqdm(all_df_pths):
