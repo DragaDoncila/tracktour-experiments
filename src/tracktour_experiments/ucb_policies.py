@@ -237,8 +237,8 @@ def rank_edges_by_ucb(
         arm: get_reward_for_arm(rewards, played_ranks, arm, t, gamma) for arm in bandit_arms
     }
 
-    unsampled = (df.bandit_rank == -1).sum()
-    while unsampled > 0:
+    unsampled = set(df.index)
+    while len(unsampled) > 0:
         arm = get_arm_to_play(
             bandit_arms,
             discounted_arm_played,
@@ -249,12 +249,13 @@ def rank_edges_by_ucb(
         )
         edge = feature_ranked[arm].index[next_index[arm]]
         next_index[arm] += 1
-        if df.loc[edge, 'bandit_rank'] == -1:
-            df.loc[edge, 'bandit_rank'] = t
-            df.loc[edge, 'bandit_arm'] = arm
-        discounted_arm_rewards[arm] += int(df.loc[edge, 'solution_incorrect'])
+        if df.at[edge, 'bandit_rank'] == -1:
+            df.at[edge, 'bandit_rank'] = t
+            df.at[edge, 'bandit_arm'] = arm
+        discounted_arm_rewards[arm] += int(df.at[edge, 'solution_incorrect'])
         t += 1
-        unsampled = (df.bandit_rank == -1).sum()
+        if edge in unsampled:
+            unsampled.remove(int(edge))
 
 if __name__ == '__main__':
     all_df_pth = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb_w_resolve/'
