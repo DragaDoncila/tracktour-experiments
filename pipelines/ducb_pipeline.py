@@ -7,7 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 from tracktour._tracker import VirtualVertices
 from tracktour_experiments.generate_configs import get_config_for_row
-from tracktour_experiments.ucb_policies import get_arm_to_play, initialize_bandit
+from tracktour_experiments.ucb_policies import get_arm_to_play, initialize_bandit, get_count_arm_played, get_reward_for_arm
 
 
 def populate_label_ws_enter_exit(all_edges, solution_graph, gt_graph, sol_to_gt):
@@ -56,11 +56,11 @@ def populate_label_ws_enter_exit(all_edges, solution_graph, gt_graph, sol_to_gt)
 
 
 def get_edge_to_inspect(
-        still_to_inspect,
+        bandit_arms,
         sol_edges,
         feature_ranked,
-        played_ranks,
-        rewards,
+        discounted_arm_played,
+        discounted_arm_rewards,
         next_index,
         t,
         b,
@@ -68,10 +68,9 @@ def get_edge_to_inspect(
         gamma
     ):
     next_arm = get_arm_to_play(
-        still_to_inspect,
-        played_ranks,
-        rewards,
-        t,
+        bandit_arms,
+        discounted_arm_played,
+        discounted_arm_rewards,
         B=b,
         epsilon=epsilon,
         gamma=gamma
@@ -81,14 +80,12 @@ def get_edge_to_inspect(
     # this next edge has been seen by the bandit, with a different arm
     # reward the bandit, but select a new arm
     while sol_edges.loc[edge, 'bandit_rank'] != -1:
-        played_ranks[next_arm].append(t)
-        rewards[next_arm].append(int(sol_edges.loc[edge, 'solution_incorrect']))
+        discounted_arm_rewards[next_arm] += int(sol_edges.at[edge, 'solution_incorrect'])
         t += 1
         next_arm = get_arm_to_play(
-            still_to_inspect,
-            played_ranks,
-            rewards,
-            t,
+            bandit_arms,
+            discounted_arm_played,
+            discounted_arm_rewards,
             B=b,
             epsilon=epsilon,
             gamma=gamma
@@ -98,27 +95,54 @@ def get_edge_to_inspect(
     # now we have a new bandit edge to inspect
     sol_edges.loc[edge, 'bandit_rank'] = t
     sol_edges.loc[edge, 'bandit_arm'] = next_arm
-    played_ranks[next_arm].append(t)
-    rewards[next_arm].append(int(sol_edges.loc[edge, 'solution_incorrect']))
+    discounted_arm_rewards[next_arm] += int(sol_edges.at[edge, 'solution_incorrect'])
     t += 1
     return edge
 
-def correct_edge(new_edge, sol_edges, tracked, gt_graph, pred_graph, sol_to_gt, gt_to_sol):
+def handle_edge(new_edge, sol_edges, tracker, gt_graph, pred_graph, sol_to_gt, gt_to_sol):
     edge_row = sol_edges.loc[new_edge]
-    source = edge_row.u
+    edge_index = int(edge_row.name)
+    source = int(edge_row.u)
+    target = int(edge_row.v)
     error_type = edge_row.error_type
 
-    gt_vertices_to_add = []
-    edges_to_remove = []
-    edges_to_add = []
-
+    if error_type == 'Correct':
+        # fix in model
+        sol_edges.at[new_edge, 'fixed_edge'] = True
+        tracker.fix_edge_in_model(edge_index, source, target, lb=1)
+        return
     if error_type == 'FA':
-        pass
-    elif error_type == 'FE':
-        pass
-    else:
-        pass
-        
+        # get correct predecessor of v
+        gt_target = sol_to_gt[target]
+        gt_predecessors = list(gt_graph.predecessors(gt_target))
+        if len(gt_predecessors) == 0:
+            raise ValueError("No predecessor found for FA correction")
+        if len(gt_predecessors) > 1:
+            raise ValueError("Multiple predecessors found for FA correction")
+        gt_predecessor = gt_predecessors[0]
+        if gt_predecessor not in gt_to_sol:
+            # this is an FN vertex, needs to be introduced
+            # its index will be n_vertices + 1
+            # we'll need to add edge (gt_predecessor, target) to all_edges
+            # we'll need to add the flow var to the model, and fix lb/ub = 1
+            # we'll need to copy its segmentation  mask into seg
+            # we'll need to figure out its predecessors (and successors? what if it divides?)
+            pass
+        else:
+            sol_predecessor = gt_to_sol[gt_predecessor]
+            # if this edge is already in our model then we just need to fix it
+            existing_edge = tracker._all_edges[(tracker._all_edges.u == sol_predecessor) & (tracker._all_edges.v == target)]
+            if len(existing_edge) > 0:
+                # edge exists, just fix it
+                correct_edge_index = int(existing_edge.index[0])
+                sol_edges.at[new_edge, 'fixed_edge'] = True
+                tracker.fix_edge_in_model(edge_index, source, target, lb=0, ub=0)
+                tracker.fix_edge_in_model(correct_edge_index, sol_predecessor, target, lb=1)
+                sol_edges.at[edge_index, 'fixed_edge'] = True
+                # sol_edges.at[edge_index, 'introduced_correction'] = True
+            # otherwise we need to introduce the edge as well
+            else:
+                raise NotImplementedError("Missing edge for existing predecessor in FA")
 
 
 
@@ -131,14 +155,14 @@ if __name__ == "__main__":
     ds_summary = pd.read_csv(ds_summary_pth)
 
     ds_with_err = [
-        "Fluo-N3DH-SIM+_01",
-        "Fluo-N3DH-SIM+_02",
-        "Fluo-C3DL-MDA231_01",
-        "Fluo-C3DL-MDA231_02",
-        "Fluo-N2DH-GOWT1_01",
-        "Fluo-N2DH-GOWT1_02",
-        "PhC-C2DH-U373_01",
-        "PhC-C2DH-U373_02",
+        # "Fluo-N3DH-SIM+_01",
+        # "Fluo-N3DH-SIM+_02",
+        # "Fluo-C3DL-MDA231_01",
+        # "Fluo-C3DL-MDA231_02",
+        # "Fluo-N2DH-GOWT1_01",
+        # "Fluo-N2DH-GOWT1_02",
+        # "PhC-C2DH-U373_01",
+        # "PhC-C2DH-U373_02",
         "Fluo-N2DL-HeLa_01",
         "Fluo-N2DL-HeLa_02",
         "Fluo-C2DL-MSC_01",
@@ -176,7 +200,7 @@ if __name__ == "__main__":
             div_constraint=False,
         )
         # solve, keep tracked
-        tracked = initial_config.run(compute_additional_features=True)
+        tracker, tracked = initial_config.run(compute_additional_features=True)
         # evaluate
         results, matched = initial_config.evaluate(
             tracked.tracked_detections, tracked.tracked_edges
@@ -196,7 +220,6 @@ if __name__ == "__main__":
             f"{out_pth}/{ds_name}_all_edges_with_target_ws_fa_fe.csv", index=False
         )
 
-        tracked.all_edges['inspected'] = False
         tracked.all_edges['fixed_edge'] = False
         tracked.all_edges['introduced_correction'] = False
         tracked.all_edges['bandit_rank'] = -1
@@ -215,35 +238,45 @@ if __name__ == "__main__":
         bandit_arms=["cost", "softmax_entropy", "sensitivity_diff", "softmax", "parental_softmax"]
         ascending_sort=[False, False, True, True, True]      
 
-        feature_ranked, played_ranks, rewards, next_index, t = initialize_bandit(
-            sol_edges,
-            bandit_arms=bandit_arms,
-            ascending_sort=ascending_sort
-        )
-        while sol_edges.inspected.sum() < sol_edges.shape[0]:
-            print(f'Starting new inspection round for {ds_name}')
-            still_to_inspect = sol_edges[~sol_edges.inspected]
-            print(f'{still_to_inspect.shape[0]} edges still to inspect')
+        feature_ranked, played_ranks, rewards, next_index, t = initialize_bandit(sol_edges, bandit_arms, ascending_sort)
+        discounted_arm_played = {
+            arm: get_count_arm_played(played_ranks, arm, t, gamma) for arm in bandit_arms
+        }
+        discounted_arm_rewards = {
+            arm: get_reward_for_arm(rewards, played_ranks, arm, t, gamma) for arm in bandit_arms
+        }
+
+        unsampled = set(sol_edges[sol_edges.bandit_rank == -1].index.tolist())
+        while len(unsampled) > 0:
+            # print(f'Starting new inspection round for {ds_name}')
+            # print(f'{len(unsampled)} edges still to inspect')
             new_edge = get_edge_to_inspect(
-                still_to_inspect,
+                bandit_arms,
                 sol_edges,
                 feature_ranked,
-                played_ranks,
-                rewards,
+                discounted_arm_played,
+                discounted_arm_rewards,
                 next_index,
                 t,
                 b,
                 epsilon,
                 gamma
             )
-            # if the edge is incorrect, we correct it
-            if sol_edges.loc[new_edge, 'solution_incorrect']:
-                correct_edge(new_edge, sol_edges, tracked, gt_graph, sol_graph, sol_to_gt, gt_to_sol)
-            # otherwise we fix it in the model and move on
-            else:
-                fix_edge_in_model(new_edge, sol_edges, tracked)
+            handle_edge(
+                new_edge,
+                sol_edges,
+                tracker,
+                gt_graph,
+                sol_graph,
+                sol_to_gt,
+                gt_to_sol
+            )
+            
 
 
+            if new_edge in unsampled:
+                unsampled.remove(int(new_edge))
+        print("HI")
 
 
 
