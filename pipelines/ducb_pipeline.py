@@ -1,16 +1,19 @@
-# starting with "standard" merge-containing solution
-# no prior edges have been inspected
-
+import json
 import os
 import numpy as np
 import pandas as pd
+from geff import read_nx
 from tqdm import tqdm
 from tracktour._tracker import VirtualVertices
-from tracktour_experiments.generate_configs import get_config_for_row
-from tracktour_experiments.ucb_policies import get_arm_to_play, initialize_bandit, get_count_arm_played, get_reward_for_arm
+from tracktour_experiments.ucb_policies import rank_edges_by_ucb
 
-
-def populate_label_ws_enter_exit(all_edges, solution_graph, gt_graph, sol_to_gt):
+def populate_label_ws_enter_exit(
+        all_edges,
+        solution_graph,
+        gt_graph,
+        sol_to_gt,
+        mark_ws_incorrect=True
+    ):
     def is_edge_tp(edge):
         u, v = int(edge["u"]), int(edge["v"])
         # appearance edge, correct if destination node in gt_graph
@@ -23,9 +26,9 @@ def populate_label_ws_enter_exit(all_edges, solution_graph, gt_graph, sol_to_gt)
             return int(gt_graph.out_degree(sol_to_gt[u]) == 0)
         elif not solution_graph.has_edge(u, v):
             return 0
-        is_tp = ("is_ctc_fp" not in solution_graph.edges[u, v]) and (
-            "is_wrong_semantic" not in solution_graph.edges[u, v]
-        )
+        is_fp = solution_graph.edges[u, v].get("EdgeFlag.CTC_FALSE_POS", False)
+        is_ws = mark_ws_incorrect and solution_graph.edges[u, v].get("EdgeFlag.WRONG_SEMANTIC", False)
+        is_tp = not (is_fp or is_ws)
         return int(is_tp)
 
     def get_error_cat(edge):
@@ -44,252 +47,82 @@ def populate_label_ws_enter_exit(all_edges, solution_graph, gt_graph, sol_to_gt)
             return "Correct"
         if not solution_graph.has_edge(u, v):
             return "None"
-        if "is_ctc_fp" in solution_graph.edges[u, v]:
+        if solution_graph.edges[u, v].get("EdgeFlag.CTC_FALSE_POS", False):
             return "FP"
-        if "is_wrong_semantic" in solution_graph.edges[u, v]:
+        if solution_graph.edges[u, v].get("EdgeFlag.WRONG_SEMANTIC", False):
             return "WS"
         return "Correct"
 
     all_edges["oracle_is_correct"] = all_edges.apply(is_edge_tp, axis=1)
     all_edges["error_type"] = all_edges.apply(get_error_cat, axis=1)
-    all_edges["solution_incorrect"] = all_edges.error_type != "Correct"
+    all_edges["solution_incorrect"] = all_edges.oracle_is_correct == 0
 
+def read_traccuracy_graphs(ds_dir):
+    map_path = os.path.join(ds_dir, 'matching.json')
+    zarr_path = os.path.join(ds_dir, 'matched_solution.zarr')
 
-def get_edge_to_inspect(
-        bandit_arms,
-        sol_edges,
-        feature_ranked,
-        discounted_arm_played,
-        discounted_arm_rewards,
-        next_index,
-        t,
-        b,
-        epsilon,
-        gamma
-    ):
-    next_arm = get_arm_to_play(
-        bandit_arms,
-        discounted_arm_played,
-        discounted_arm_rewards,
-        B=b,
-        epsilon=epsilon,
-        gamma=gamma
-    )
-    edge = feature_ranked[next_arm].index[next_index[next_arm]]
-    next_index[next_arm] += 1
-    # this next edge has been seen by the bandit, with a different arm
-    # reward the bandit, but select a new arm
-    while sol_edges.loc[edge, 'bandit_rank'] != -1:
-        discounted_arm_rewards[next_arm] += int(sol_edges.at[edge, 'solution_incorrect'])
-        t += 1
-        next_arm = get_arm_to_play(
-            bandit_arms,
-            discounted_arm_played,
-            discounted_arm_rewards,
+    sol_path = os.path.join(zarr_path, 'pred.geff')
+    gt_path = os.path.join(zarr_path, 'gt.geff')
+    sol_graph = read_nx(sol_path, validate=False)[0]
+    gt_graph = read_nx(gt_path, validate=False)[0]
+    with open(map_path, 'r') as map_file:
+        matching = json.load(map_file)
+    return sol_graph, gt_graph, matching
+
+def populate_errors_all_datasets(solved_ds_dir, out_dir, mark_ws_incorrect=True):
+    ds_names = [
+        name for name in os.listdir(solved_ds_dir)
+        if os.path.isdir(os.path.join(solved_ds_dir, name))
+    ]
+    for ds_name in tqdm(ds_names):
+        ds_dir = os.path.join(solved_ds_dir, ds_name)
+        all_edges_pth = os.path.join(ds_dir, 'all_edges.csv')
+        all_edges = pd.read_csv(all_edges_pth)
+        sol_graph, gt_graph, mapping = read_traccuracy_graphs(ds_dir)
+        sol_to_gt = {tup[1] : tup[0] for tup in mapping}
+
+        populate_label_ws_enter_exit(
+            all_edges,
+            sol_graph,
+            gt_graph,
+            sol_to_gt,
+            mark_ws_incorrect=mark_ws_incorrect
+        )
+        all_edges.to_csv(f'{out_dir}/{ds_name}_all_edges_with_errors.csv', index=False)
+
+if __name__ == "__main__":
+    MARK_WS_INCORRECT = False
+    SOLVED_DS_DIR = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/scaled_w_merge'
+    OUT_DF_PTH = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb/merges_no_ws'
+
+    # assign error categories to edges in solved datasets
+    populate_errors_all_datasets(SOLVED_DS_DIR, OUT_DF_PTH, mark_ws_incorrect=MARK_WS_INCORRECT)
+
+    all_df_pths = [
+        os.path.join(OUT_DF_PTH, f) for f in os.listdir(OUT_DF_PTH) if f.endswith('.csv')
+    ]
+
+    for pth in tqdm(all_df_pths):
+        ds_name = os.path.basename(pth).replace('_all_edges_with_errors.csv', '')
+        ds_df = pd.read_csv(pth)
+        ds_df['bandit_rank'] = -1
+        ds_df['bandit_arm'] = 'None'
+        sol_df = ds_df[(ds_df.flow > 0) & (ds_df.u != -1) & (ds_df.u != -3)]
+
+        b = 2
+        gamma = 1 - (1 / (4 * np.sqrt(2 * ds_df.shape[0])))
+        epsilon = 1/2
+        print('Processing', ds_name, 'with gamma', gamma)
+        rank_edges_by_ucb(
+            sol_df,
+            bandit_arms=["cost", "softmax_entropy", "sensitivity_diff", "softmax", "parental_softmax"],
+            ascending_sort=[False, False, True, True, True],
             B=b,
             epsilon=epsilon,
             gamma=gamma
         )
-        edge = feature_ranked[next_arm].index[next_index[next_arm]]
-        next_index[next_arm] += 1
-    # now we have a new bandit edge to inspect
-    sol_edges.loc[edge, 'bandit_rank'] = t
-    sol_edges.loc[edge, 'bandit_arm'] = next_arm
-    discounted_arm_rewards[next_arm] += int(sol_edges.at[edge, 'solution_incorrect'])
-    t += 1
-    return edge
-
-def handle_edge(new_edge, sol_edges, tracker, gt_graph, pred_graph, sol_to_gt, gt_to_sol):
-    edge_row = sol_edges.loc[new_edge]
-    edge_index = int(edge_row.name)
-    source = int(edge_row.u)
-    target = int(edge_row.v)
-    error_type = edge_row.error_type
-
-    if error_type == 'Correct':
-        # fix in model
-        sol_edges.at[new_edge, 'fixed_edge'] = True
-        tracker.fix_edge_in_model(edge_index, source, target, lb=1)
-        return
-    if error_type == 'FA':
-        # get correct predecessor of v
-        gt_target = sol_to_gt[target]
-        gt_predecessors = list(gt_graph.predecessors(gt_target))
-        if len(gt_predecessors) == 0:
-            raise ValueError("No predecessor found for FA correction")
-        if len(gt_predecessors) > 1:
-            raise ValueError("Multiple predecessors found for FA correction")
-        gt_predecessor = gt_predecessors[0]
-        if gt_predecessor not in gt_to_sol:
-            # this is an FN vertex, needs to be introduced
-            # its index will be n_vertices + 1
-            # we'll need to add edge (gt_predecessor, target) to all_edges
-            # we'll need to add the flow var to the model, and fix lb/ub = 1
-            # we'll need to copy its segmentation  mask into seg
-            # we'll need to figure out its predecessors (and successors? what if it divides?)
-            pass
-        else:
-            sol_predecessor = gt_to_sol[gt_predecessor]
-            # if this edge is already in our model then we just need to fix it
-            existing_edge = tracker._all_edges[(tracker._all_edges.u == sol_predecessor) & (tracker._all_edges.v == target)]
-            if len(existing_edge) > 0:
-                # edge exists, just fix it
-                correct_edge_index = int(existing_edge.index[0])
-                sol_edges.at[new_edge, 'fixed_edge'] = True
-                tracker.fix_edge_in_model(edge_index, source, target, lb=0, ub=0)
-                tracker.fix_edge_in_model(correct_edge_index, sol_predecessor, target, lb=1)
-                sol_edges.at[edge_index, 'fixed_edge'] = True
-                # sol_edges.at[edge_index, 'introduced_correction'] = True
-            # otherwise we need to introduce the edge as well
-            else:
-                raise NotImplementedError("Missing edge for existing predecessor in FA")
-
-
-
-if __name__ == "__main__":
-    out_pth = "/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb_w_resolve"
-
-    ds_summary_pth = (
-        "/home/ddon0001/PhD/experiments/scaled/no_div_constraint_err_seg/summary.csv"
-    )
-    ds_summary = pd.read_csv(ds_summary_pth)
-
-    ds_with_err = [
-        # "Fluo-N3DH-SIM+_01",
-        # "Fluo-N3DH-SIM+_02",
-        # "Fluo-C3DL-MDA231_01",
-        # "Fluo-C3DL-MDA231_02",
-        # "Fluo-N2DH-GOWT1_01",
-        # "Fluo-N2DH-GOWT1_02",
-        # "PhC-C2DH-U373_01",
-        # "PhC-C2DH-U373_02",
-        "Fluo-N2DL-HeLa_01",
-        "Fluo-N2DL-HeLa_02",
-        "Fluo-C2DL-MSC_01",
-        "Fluo-C2DL-MSC_02",
-        "Fluo-C3DH-H157_02",
-        "DIC-C2DH-HeLa_01",
-        "DIC-C2DH-HeLa_02",
-        "Fluo-N3DH-CHO_01",
-        "Fluo-N3DH-CHO_02",
-        "BF-C2DL-MuSC_01",
-        "BF-C2DL-MuSC_02",
-        "BF-C2DL-HSC_01",
-        "BF-C2DL-HSC_02",
-        "Fluo-N2DH-SIM+_01",
-        "Fluo-N2DH-SIM+_02",
-        "PhC-C2DL-PSC_01",
-        "PhC-C2DL-PSC_02",
-        "Fluo-N3DH-CE_01",
-        "Fluo-N3DH-CE_02",
-    ]
-
-    feature_names = [
-        "cost",
-        "softmax_entropy",
-        "sensitivity_diff",
-        "softmax",
-        "parental_softmax",
-    ]
-    for ds_name in tqdm(ds_with_err):
-
-        ds_summary_row = ds_summary[ds_summary["ds_name"] == ds_name].squeeze()
-        initial_config = get_config_for_row(
-            ds_summary_row,
-            out_root=out_pth,
-            div_constraint=False,
-        )
-        # solve, keep tracked
-        tracker, tracked = initial_config.run(compute_additional_features=True)
-        # evaluate
-        results, matched = initial_config.evaluate(
-            tracked.tracked_detections, tracked.tracked_edges
-        )
-        gt_graph = matched.gt_graph.graph
-        sol_graph = matched.pred_graph.graph
-        gt_to_sol = {item[0]: item[1] for item in matched.mapping}
-        sol_to_gt = {item[1]: item[0] for item in matched.mapping}
-        # assign edge error types
-        populate_label_ws_enter_exit(
-            tracked.all_edges,
-            sol_graph,
-            gt_graph,
-            sol_to_gt,
-        )
-        tracked.all_edges.to_csv(
-            f"{out_pth}/{ds_name}_all_edges_with_target_ws_fa_fe.csv", index=False
-        )
-
-        tracked.all_edges['fixed_edge'] = False
-        tracked.all_edges['introduced_correction'] = False
-        tracked.all_edges['bandit_rank'] = -1
-        tracked.all_edges['bandit_arm'] = 'None'
-
-        sol_edges = tracked.all_edges[
-            (tracked.all_edges.flow > 0)
-            & (tracked.all_edges.u != -1)
-            & (tracked.all_edges.u != -3)
-        ]
-
-        b = 2
-        gamma = 1 - (1 / (4 * np.sqrt(2 * sol_edges.shape[0])))
-        epsilon = 1/2
-
-        bandit_arms=["cost", "softmax_entropy", "sensitivity_diff", "softmax", "parental_softmax"]
-        ascending_sort=[False, False, True, True, True]      
-
-        feature_ranked, played_ranks, rewards, next_index, t = initialize_bandit(sol_edges, bandit_arms, ascending_sort)
-        discounted_arm_played = {
-            arm: get_count_arm_played(played_ranks, arm, t, gamma) for arm in bandit_arms
-        }
-        discounted_arm_rewards = {
-            arm: get_reward_for_arm(rewards, played_ranks, arm, t, gamma) for arm in bandit_arms
-        }
-
-        unsampled = set(sol_edges[sol_edges.bandit_rank == -1].index.tolist())
-        while len(unsampled) > 0:
-            # print(f'Starting new inspection round for {ds_name}')
-            # print(f'{len(unsampled)} edges still to inspect')
-            new_edge = get_edge_to_inspect(
-                bandit_arms,
-                sol_edges,
-                feature_ranked,
-                discounted_arm_played,
-                discounted_arm_rewards,
-                next_index,
-                t,
-                b,
-                epsilon,
-                gamma
-            )
-            handle_edge(
-                new_edge,
-                sol_edges,
-                tracker,
-                gt_graph,
-                sol_graph,
-                sol_to_gt,
-                gt_to_sol
-            )
-            
-
-
-            if new_edge in unsampled:
-                unsampled.remove(int(new_edge))
-        print("HI")
-
-
-
-        # get ranked edges for each feature
-        # assign DUCB rank to each solution edge
-        # solution_edges = tracked.all_edges[tracked.all_edges.flow > 0]
-        # edges_with_ducb_rank = populate_ducb_ranking(solution_edges, feature_names)
-        
-        
-        # sample n edges and correct errors
-        # evaluate & save
-        # fix inspected edges
-        # re-solve & save
-        # evaluate & save
-        # update the config...?
-        # repeat until we've inspected all edges?
+        ds_df.loc[sol_df.index, 'bandit_rank'] = sol_df.bandit_rank
+        ds_df.loc[sol_df.index, 'bandit_arm'] = sol_df.bandit_arm
+        ds_df.to_csv(pth, index=False)
+        print(f'Wrote {pth}')
+        print('#' * 40)

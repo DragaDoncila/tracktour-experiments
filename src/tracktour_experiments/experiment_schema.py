@@ -125,7 +125,6 @@ class Traxperiment(BaseModel):
         tracker = self.as_tracker()
         if tracker.PENALIZE_FLOW and tracker.FLOW_PENALTY_COEFFICIENT == 0:
             raise ValueError("Cannot penalize flow with a coefficient of 0.")
-        
         # load detections
         detections = pd.read_csv(self.data_config.detections_path)
         
@@ -150,7 +149,7 @@ class Traxperiment(BaseModel):
         if write_out:
             self.write_solved(tracked, start, as_ctc=as_ctc)
 
-        return tracked
+        return tracker, tracked
     
     def evaluate(self, tracked_detections=None, tracked_edges=None, write_out=True, as_ctc=False):
         if self.data_config.ground_truth_path is None:
@@ -355,7 +354,7 @@ if __name__ == '__main__':
     experiment = Traxperiment(data_config=data_config)
     experiment.tracktour_config.div_constraint = True
     
-    tracked = experiment.run()
+    _, tracked = experiment.run()
     
     experiment.data_config.ground_truth_path = '/home/ddon0001/PhD/data/cell_tracking_challenge/ST/Fluo-N2DL-HeLa/02_GT/TRA/'
     experiment.data_config.value_key = 'label'

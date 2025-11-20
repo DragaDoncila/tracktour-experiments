@@ -2,8 +2,11 @@ from enum import Enum
 import json
 import networkx as nx
 import os
+import numpy as np
 import pandas as pd
 import yaml
+
+from skimage.measure import regionprops
 
 class OUT_FILE(Enum):
     # solutions
@@ -208,3 +211,80 @@ def classify_divisions(ds_name, div_sol, all_edges, parent_nodes):
         'super_parent': super_parents
     }
     return counts, indices
+
+def replace_fn_and_overlapping_mask(
+        fn_frame,
+        seg,
+        fn_t,
+        fn_label,
+        t_label_to_node_id,
+        new_label,
+        pred_to_gt,
+        gt_graph
+    ):
+    # if fn overlaps any existing seg ID, find the GT version of that seg ID
+    # delete the original seg ID, and copy over the fn label mask and the GT version
+    # of overlapping ID
+    sol_frame = seg[fn_t]
+    fn_mask = fn_frame == fn_label
+    overlapping_mask = (sol_frame > 0) & (fn_mask > 0)
+    overlapping_indices = overlapping_mask.nonzero()
+    # what's the seg value that we're overlapping with in seg
+    overlapping_seg_ids = sol_frame[overlapping_indices]
+    # we might overlap with multiple existing SEG ids e.g. the merge, and another one
+    # we replace each overlapping ID with their GT matched ID before introducing
+    # the FN ID...
+    for overlapping_seg_id in np.unique(overlapping_seg_ids):
+        # we have no FPs so this seg ID has already been matched to something. We need to find what it is
+        overlapping_node_id = t_label_to_node_id[(fn_t, overlapping_seg_id)]
+        matched_gt_id = pred_to_gt[overlapping_node_id]
+        matched_gt_label = gt_graph.nodes[matched_gt_id]['segmentation_id']
+        matched_gt_mask = fn_frame == matched_gt_label
+
+        # the replaced segs keep their original IDs
+        seg[fn_t] = np.where(sol_frame == overlapping_seg_id, 0, sol_frame)
+        seg[fn_t][matched_gt_mask] = overlapping_seg_id
+    
+    # now that we've replaced overlapping IDs, we copy over the FN mask
+    seg[fn_t][fn_mask] = new_label
+    # get the coords of the fn mask
+    centroid = regionprops(fn_mask)[0].centroid
+    # return the centroid for adding a new vertex later
+    return centroid
+
+
+def update_segmentation_with_fn(
+        source,
+        target,
+        is_target_fn,
+        sol_to_gt,
+        gt_graph,
+        sol_seg,
+        gt_seg,
+        current_max_label:list[int],
+        t_label_to_node_id
+    ):
+    current_max_label[0] += 1
+    new_id = current_max_label[0]
+    if is_target_fn:
+        fn_info = gt_graph.nodes[target]
+    else:
+        fn_info = gt_graph.nodes[source]
+    
+    fn_label = fn_info['label']
+    fn_t = fn_info['t']
+
+    added_centroid = replace_fn_and_overlapping_mask(
+        fn_frame=gt_seg[fn_t],
+        seg=sol_seg,
+        fn_t=fn_t,
+        fn_label=fn_label,
+        t_label_to_node_id=t_label_to_node_id,
+        new_label=new_id,
+        pred_to_gt=sol_to_gt,
+        gt_graph=gt_graph
+    )
+    # at this point the segmentation itself is up to date
+    # and only has one new vertex, with label current_max_label[0]
+    return added_centroid
+    

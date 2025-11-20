@@ -19,6 +19,7 @@ import warnings
 
 import pandas as pd
 from tqdm import tqdm
+from tifffile import imread
 from tracktour import get_im_centers, load_tiff_frames
 
 
@@ -93,15 +94,18 @@ def generate_ctc_summary(root_seg_dir, ds_summary_path, gt_dir=None, use_gt=Fals
             # load ims get shape and number of frames
             # TODO: should not be loading these unless we need to extract detections
             name = f'{ds_name}_{seq}'
-            ims = load_tiff_frames(seq_pth)
-            im_shape = ims[0].shape
-            n_frames = ims.shape[0]
+            im_paths = glob.glob(os.path.join(in_seg_path, '*.tif'))
+            if not im_paths:
+                raise ValueError(f'No tif images found in {in_seg_path} for dataset {name}.')
+            # ims = load_tiff_frames(seq_pth)
+            im_shape = imread(im_paths[0]).shape
+            n_frames = len(im_paths)
             if not os.path.exists(out_det_path):
                 # extract detections
+                warnings.warn(f"Extracting detections for {name}.", UserWarning)
                 _, detections, _, _, _ = get_im_centers(in_seg_path)
                 detections.to_csv(out_det_path)
             else:
-                warnings.warn(f"Found existing detections for {name}. Using them...", UserWarning)
                 detections = pd.read_csv(out_det_path)
             grouped_det = detections.groupby(TIME_KEY).size()
             min_cells = grouped_det.min()

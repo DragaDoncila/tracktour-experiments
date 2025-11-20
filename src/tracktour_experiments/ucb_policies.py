@@ -20,6 +20,7 @@ import pandas as pd
 from tqdm import tqdm
 
 
+
 def get_count_arm_played(played_ranks, arm_name, t, gamma=1):
     """Count the number of times an arm has been played up to round t.
 
@@ -258,10 +259,13 @@ def rank_edges_by_ucb(
             unsampled.remove(int(edge))
 
 if __name__ == '__main__':
-    all_df_pth = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb_w_resolve/'
+    SOLVED_DS_DIR = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/scaled_w_merge'
+    OUT_DF_PTH = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/merges_no_ws/'
+
+
 
     all_df_pths = [
-        os.path.join(all_df_pth, f) for f in os.listdir(all_df_pth) if f.endswith('.csv')
+        os.path.join(OUT_DF_PTH, f) for f in os.listdir(OUT_DF_PTH) if f.endswith('.csv')
     ]
 
     for pth in tqdm(all_df_pths):
