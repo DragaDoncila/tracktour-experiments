@@ -12,7 +12,7 @@ from tracktour.cli import _save_results
 from traccuracy import TrackingGraph
 from traccuracy.loaders import load_ctc_data
 from traccuracy.matchers import CTCMatcher
-from traccuracy.metrics import CTCMetrics
+from traccuracy.metrics import CTCMetrics, BasicMetrics
 from traccuracy.utils import export_graphs_to_geff
 from typing import Optional, Union
 import os
@@ -151,7 +151,14 @@ class Traxperiment(BaseModel):
 
         return tracker, tracked
     
-    def evaluate(self, tracked_detections=None, tracked_edges=None, write_out=True, as_ctc=False):
+    def evaluate(
+            self,
+            tracked_detections=None,
+            tracked_edges=None,
+            write_out=True,
+            as_ctc=False,
+            include_basic_metrics=False
+        ):
         if self.data_config.ground_truth_path is None:
             raise ValueError(f"Cannot evaluate experiment without ground truth path configured.")
         if self.data_config.value_key is None:
@@ -167,7 +174,9 @@ class Traxperiment(BaseModel):
         matcher = CTCMatcher()
         matched = matcher.compute_mapping(gt_graph, track_graph)
         results = CTCMetrics().compute(matched)
-        
+        if include_basic_metrics:
+            basic_results = BasicMetrics().compute(matched)
+            results.results.update(basic_results.results)
         if write_out:
             self.write_metrics(results, matched)
         return results.results, matched

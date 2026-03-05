@@ -1,0 +1,4 @@
+*.db
+pipelines/other_methods/ultrack/*.toml
+**/__pycache__/**
+**/.mypy_cache/**

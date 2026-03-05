@@ -162,6 +162,19 @@ def get_basic_merge_df_for_sol_set(sol_root, as_zarr=False):
     return merge_df
 
 def populate_merge_resolution_info_for_sol_set(merge_df, sol_root, as_zarr=False):
+    """Populate merge resolution information for a set of solutions.
+
+    We check if the matched ground truth successors of the merge nodes are 
+    FN nodes. 
+
+    Args:
+        merge_df (_type_): _description_
+        sol_root (_type_): _description_
+        as_zarr (bool, optional): _description_. Defaults to False.
+
+    Returns:
+        _type_: _description_
+    """
     merge_df['parent_has_fn_succ'] = False
     merge_df['fn_succ'] = '-1'
     for name, group in tqdm(merge_df.groupby('ds_name')):

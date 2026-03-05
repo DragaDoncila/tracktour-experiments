@@ -93,7 +93,7 @@ def populate_errors_all_datasets(solved_ds_dir, out_dir, mark_ws_incorrect=True)
 if __name__ == "__main__":
     MARK_WS_INCORRECT = False
     SOLVED_DS_DIR = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/scaled_w_merge'
-    OUT_DF_PTH = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb/merges_no_ws'
+    OUT_DF_PTH = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/ducb/merges_no_ws_cost_softmax_only'
 
     # assign error categories to edges in solved datasets
     populate_errors_all_datasets(SOLVED_DS_DIR, OUT_DF_PTH, mark_ws_incorrect=MARK_WS_INCORRECT)
@@ -107,6 +107,7 @@ if __name__ == "__main__":
         ds_df = pd.read_csv(pth)
         ds_df['bandit_rank'] = -1
         ds_df['bandit_arm'] = 'None'
+        # in solution, not source, not div
         sol_df = ds_df[(ds_df.flow > 0) & (ds_df.u != -1) & (ds_df.u != -3)]
 
         b = 2
@@ -115,8 +116,18 @@ if __name__ == "__main__":
         print('Processing', ds_name, 'with gamma', gamma)
         rank_edges_by_ucb(
             sol_df,
-            bandit_arms=["cost", "softmax_entropy", "sensitivity_diff", "softmax", "parental_softmax"],
-            ascending_sort=[False, False, True, True, True],
+            bandit_arms=[
+                "cost",
+                # "softmax_entropy",
+                # "sensitivity_diff",
+                "softmax"
+            ],
+            ascending_sort=[
+                False,
+                # False,
+                # True,
+                True
+            ],
             B=b,
             epsilon=epsilon,
             gamma=gamma
