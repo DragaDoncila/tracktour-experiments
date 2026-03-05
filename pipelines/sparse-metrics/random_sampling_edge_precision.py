@@ -32,7 +32,6 @@ def sample_edges_random(sol):
 def get_estimates(population_size, count_sampled, count_sampled_tp):
     if count_sampled == 0:
         return 0, 0
-    prec_estimate, std_error = get_estimates(population_size, count_sampled, count_sampled_tp)
     finite_population_correction = np.sqrt((population_size - count_sampled) / (population_size  - 1))
     prec_estimate = count_sampled_tp / count_sampled
     sample_sd = np.sqrt(prec_estimate * (1 - prec_estimate))
@@ -40,12 +39,15 @@ def get_estimates(population_size, count_sampled, count_sampled_tp):
     return prec_estimate, std_error
 
 if __name__ == '__main__':
-    out_root = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/sparse_sampling/'
+    out_root = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/sparse_sampling/edge_precision_random'
     sol_root = '/home/ddon0001/PhD/experiments/scaled/pre-thesis/scaled_no_merge_cap/'
     all_ds_names = [item for item in os.listdir(sol_root) if os.path.isdir(os.path.join(sol_root, item))]
-    
-    # for ds_name in tqdm(all_ds_names):
-    for ds_name in tqdm(['Fluo-N2DL-HeLa_01']):
+
+
+    for ds_name in tqdm(all_ds_names):
+    # for ds_name in tqdm(['Fluo-N2DL-HeLa_01']):
+        records = []
+
         sol_path = sol_root + ds_name + '/'
 
         sol = load_geff_data(
@@ -55,18 +57,32 @@ if __name__ == '__main__':
 
         population_size = sol.number_of_edges()
 
-        sample_order = sample_edges_random(sol)
-        count_sampled = 0
-        count_sampled_tp = 0
-        count_sampled_fp = 0
+        for sample_id in range(30):
+            sample_order = sample_edges_random(sol)
+            count_sampled = 0
+            count_sampled_tp = 0
+            count_sampled_fp = 0
 
-        for i, edge in enumerate(sample_order):
-            # no FP nodes so this can't fail
-            edge_info = sol.edges[edge]
-            if edge_info.get('tp', 0):
-                count_sampled_tp += 1
-            elif edge_info.get('fp', 0):
-                count_sampled_fp += 1
-            else:
-                raise ValueError(f'Edge {edge} in {ds_name} is neither TP nor FP')
-            prec_estimate, std_error = get_estimates(population_size, count_sampled, count_sampled_tp)
+            for i, edge in enumerate(sample_order):
+                edge_info = sol.edges[edge]
+                is_tp = bool(edge_info.get('tp', 0))
+                if is_tp:
+                    count_sampled_tp += 1
+                elif edge_info.get('fp', 0):
+                    count_sampled_fp += 1
+                else:
+                    raise ValueError(f'Edge {edge} in {ds_name} is neither TP nor FP')
+                count_sampled += 1
+                prec_estimate, std_error = get_estimates(population_size, count_sampled, count_sampled_tp)
+                records.append({
+                    'ds_name': ds_name,
+                    'run_id': sample_id,
+                    'sample_id': i,
+                    'edge_src': edge[0],
+                    'edge_tgt': edge[1],
+                    'is_tp': is_tp,
+                    'prec_estimate': prec_estimate,
+                    'std_error': std_error,
+                })
+
+        pd.DataFrame(records).to_csv(f'{out_root}/{ds_name}.csv', index=False)
